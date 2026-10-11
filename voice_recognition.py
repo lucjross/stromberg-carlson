@@ -30,6 +30,29 @@ def stereo_to_mono(stereo_data):
     return struct.pack(f'{len(mono_samples)}h', *mono_samples)
 
 
+class StreamResampler:
+    """Chunk-safe resampler with an anti-alias low-pass filter (numpy only)."""
+
+    def __init__(self, in_rate, out_rate, taps=101):
+        self.step = in_rate / out_rate
+        cutoff = 0.45 * out_rate / in_rate  # fraction of input sample rate
+        n = np.arange(taps) - (taps - 1) / 2
+        h = 2 * cutoff * np.sinc(2 * cutoff * n) * np.hamming(taps)
+        self.h = h / h.sum()
+        self.taps = taps
+        self.tail = np.zeros(taps - 1)
+        self.pos = 0.0  # next output position, relative to the current chunk
+
+    def process(self, samples):
+        x = np.concatenate([self.tail, samples.astype(np.float64)])
+        filtered = np.convolve(x, self.h, mode='valid')  # len == len(samples)
+        self.tail = x[-(self.taps - 1):]
+        idx = np.arange(self.pos, len(filtered) - 1, self.step)
+        out = np.interp(idx, np.arange(len(filtered)), filtered)
+        self.pos = idx[-1] + self.step - len(filtered) if len(idx) else self.pos - len(filtered)
+        return np.clip(out, -32768, 32767).astype(np.int16)
+
+
 @contextmanager
 def suppress_alsa_errors():
     """Suppress ALSA/JACK error messages during PyAudio initialization."""
@@ -144,6 +167,8 @@ class VoiceRecognizer:
             recognized_text = ""
 
             chunk_44k = 4096
+            resampler = StreamResampler(self.capture_rate, self.hardware_rate)
+            peak = 0
             utterances = []
             last_text_time = None
             silence_after_text = 2.0
@@ -153,12 +178,8 @@ class VoiceRecognizer:
 
                 mono = stereo_to_mono(data) if channels == 2 else data
                 samples = np.frombuffer(mono, dtype=np.int16)
-                new_length = int(len(samples) * self.hardware_rate / self.capture_rate)
-                resampled = np.interp(
-                    np.linspace(0, len(samples), new_length),
-                    np.arange(len(samples)),
-                    samples
-                ).astype(np.int16)
+                resampled = resampler.process(samples)
+                peak = max(peak, int(np.abs(samples).max()))
 
                 if self.recognizer.AcceptWaveform(resampled.tobytes()):
                     text = json.loads(self.recognizer.Result()).get('text', '')
@@ -178,7 +199,7 @@ class VoiceRecognizer:
                     utterances.append(final)
                 recognized_text = ' '.join(utterances)
 
-            print(f"Closing stream, recognized: '{recognized_text}'")
+            print(f"Closing stream, peak level {peak}/32767, recognized: '{recognized_text}'")
             stream.stop_stream()
             stream.close()
 
