@@ -96,26 +96,39 @@ class VoiceRecognizer:
             device_index: PyAudio device index (None = default mic)
 
         Returns:
-            str: Recognized text, or empty string if nothing recognized
+            str: Recognized text, or empty string if nothing recognized.
+            None if the microphone could not be used.
         """
         self.recognizer.Reset()
 
         with suppress_alsa_errors():
             audio = pyaudio.PyAudio()
 
+        # Try the detected channel count first, then fall back to others
+        candidates = [self._mic_channels] + [c for c in (2, 1) if c != self._mic_channels]
+        stream = None
         channels = self._mic_channels
 
         try:
-            print(f"Opening audio stream on device {device_index} ({channels}ch)...")
-            with suppress_alsa_errors():
-                stream = audio.open(
-                    format=pyaudio.paInt16,
-                    channels=channels,
-                    rate=self.capture_rate,
-                    input=True,
-                    input_device_index=device_index,
-                    frames_per_buffer=4096
-                )
+            last_error = None
+            for channels in candidates:
+                try:
+                    print(f"Opening audio stream on device {device_index} ({channels}ch)...")
+                    with suppress_alsa_errors():
+                        stream = audio.open(
+                            format=pyaudio.paInt16,
+                            channels=channels,
+                            rate=self.capture_rate,
+                            input=True,
+                            input_device_index=device_index,
+                            frames_per_buffer=4096
+                        )
+                    break
+                except OSError as e:
+                    last_error = e
+                    print(f"Could not open stream with {channels}ch: {e}")
+            if stream is None:
+                raise last_error
             print("Stream opened successfully")
             stream.start_stream()
             print("Stream started")
@@ -173,7 +186,7 @@ class VoiceRecognizer:
 
         except Exception as e:
             print(f"Error during voice recognition: {e}")
-            return ""
+            return None
 
         finally:
             audio.terminate()
