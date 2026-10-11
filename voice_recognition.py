@@ -10,6 +10,9 @@ import vosk
 import os
 import sys
 import struct
+import io
+import wave
+import requests
 import numpy as np
 from contextlib import contextmanager
 
@@ -29,9 +32,6 @@ def stereo_to_mono(stereo_data):
     # Pack back as 16-bit integers
     return struct.pack(f'{len(mono_samples)}h', *mono_samples)
 
-
-# Single words Vosk tends to hallucinate from noise
-FILLER_WORDS = {'the', 'a', 'uh', 'um', 'huh', 'when', 'oh', 'hm', 'mm'}
 
 
 class StreamResampler:
@@ -55,6 +55,25 @@ class StreamResampler:
         out = np.interp(idx, np.arange(len(filtered)), filtered)
         self.pos = idx[-1] + self.step - len(filtered) if len(idx) else self.pos - len(filtered)
         return np.clip(out, -32768, 32767).astype(np.int16)
+
+
+class HighPass:
+    """Chunk-safe FIR high-pass filter; removes mains hum (60 Hz and low harmonics)."""
+
+    def __init__(self, rate, cutoff=180, taps=501):
+        n = np.arange(taps) - (taps - 1) / 2
+        lp = 2 * (cutoff / rate) * np.sinc(2 * (cutoff / rate) * n) * np.hamming(taps)
+        lp /= lp.sum()
+        self.h = -lp
+        self.h[(taps - 1) // 2] += 1.0
+        self.taps = taps
+        self.tail = np.zeros(taps - 1)
+
+    def process(self, samples):
+        x = np.concatenate([self.tail, samples.astype(np.float64)])
+        y = np.convolve(x, self.h, mode='valid')
+        self.tail = x[-(self.taps - 1):]
+        return np.clip(y, -32768, 32767).astype(np.int16)
 
 
 @contextmanager
@@ -113,7 +132,34 @@ class VoiceRecognizer:
         self.recognizer = vosk.KaldiRecognizer(self.model, self.hardware_rate)
         print(f"Vosk model loaded successfully (using {self.hardware_rate} Hz)")
 
-    def listen_for_speech(self, max_timeout=30, device_index=None):
+    def _transcribe_deepgram(self, pcm16k):
+        """Transcribe 16 kHz mono int16 audio with Deepgram. Returns text ('' if none heard), or None on failure."""
+        api_key = os.environ.get('DEEPGRAM_API_KEY')
+        if not api_key:
+            print("DEEPGRAM_API_KEY is not set")
+            return None
+        try:
+            buf = io.BytesIO()
+            with wave.open(buf, 'wb') as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(self.hardware_rate)
+                w.writeframes(pcm16k.tobytes())
+            resp = requests.post(
+                'https://api.deepgram.com/v1/listen',
+                params={'model': 'nova-3', 'language': 'en', 'smart_format': 'true'},
+                headers={'Authorization': f'Token {api_key}', 'Content-Type': 'audio/wav'},
+                data=buf.getvalue(),
+                timeout=10,
+            )
+            resp.raise_for_status()
+            alt = resp.json()['results']['channels'][0]['alternatives'][0]
+            return alt.get('transcript', '').strip()
+        except Exception as e:
+            print(f"Deepgram error: {e}")
+            return None
+
+    def listen_for_speech(self, max_timeout=12, device_index=None):
         """
         Listen for speech and convert to text.
         Stops automatically when speech ends (voice activity detection).
@@ -124,9 +170,11 @@ class VoiceRecognizer:
 
         Returns:
             str: Recognized text, or empty string if nothing recognized.
-            None if the microphone could not be used.
+            None if the microphone or transcription failed.
         """
         self.recognizer.Reset()
+        import time
+        t_called = time.time()
 
         with suppress_alsa_errors():
             audio = pyaudio.PyAudio()
@@ -158,68 +206,71 @@ class VoiceRecognizer:
                 raise last_error
             print("Stream opened successfully")
             stream.start_stream()
-            print("Stream started")
+            print(f"Stream started ({time.time() - t_called:.2f}s after listen requested)")
 
             print("Listening... (speak now, will auto-stop when you finish)")
 
             # Reset stop flag
             self.stop_listening = False
 
-            # Read audio data until speech detected or timeout
-            import time
-            start_time = time.time()
+            # Capture until speech has been heard and then ends, or timeout.
+            # The loop only does cheap work: Vosk runs ~2x slower than real time on a
+            # Pi 3B+, and running it here made the mic buffer overflow and drop audio.
             recognized_text = ""
 
             chunk_44k = 4096
+            chunk_seconds = chunk_44k / self.capture_rate
             resampler = StreamResampler(self.capture_rate, self.hardware_rate)
+            highpass = HighPass(self.hardware_rate)
             peak = 0
-            utterances = []
-            last_activity = start_time
-            last_partial = ""
-            silence_after_text = 1.5
-            settle_seconds = 0.5
+            resampled_chunks = []
+            raw_chunks = []  # debug: keep raw capture so it can be replayed offline
+            noise_floor = float('inf')
+            speech_blocks = 0
+            last_voice_time = 0.0  # in audio time (seconds of audio captured)
+            silence_after_text = 1.2
 
-            while time.time() - start_time < max_timeout and not self.stop_listening:
+            while len(raw_chunks) * chunk_seconds < max_timeout and not self.stop_listening:
                 data = stream.read(chunk_44k, exception_on_overflow=False)
+                raw_chunks.append(data)
+                audio_time = len(raw_chunks) * chunk_seconds
 
                 mono = stereo_to_mono(data) if channels == 2 else data
                 samples = np.frombuffer(mono, dtype=np.int16)
-                resampled = resampler.process(samples)
+                resampled = highpass.process(resampler.process(samples))
+                resampled_chunks.append(resampled)
                 peak = max(peak, int(np.abs(samples).max()))
 
-                # Ignore the first moments: prompt tail / line noise can yield junk words
-                if time.time() - start_time < settle_seconds:
-                    continue
-
-                if self.recognizer.AcceptWaveform(resampled.tobytes()):
-                    text = json.loads(self.recognizer.Result()).get('text', '')
-                    last_partial = ""
-                    if text:
-                        print(f"Heard: '{text}'")
-                        utterances.append(text)
-                        last_activity = time.time()
-                else:
-                    partial = json.loads(self.recognizer.PartialResult()).get('partial', '')
-                    if partial and partial != last_partial:
-                        last_activity = time.time()
-                    last_partial = partial
-
-                # Stop once real speech was heard and then went quiet
-                if utterances and not last_partial and time.time() - last_activity > silence_after_text:
-                    if not all(u in FILLER_WORDS for u in utterances):
-                        break
-                    utterances = []  # only noise so far; keep listening
+                # Energy-based end-of-speech: speech must rise above the noise floor,
+                # then stay below it for silence_after_text seconds.
+                block_rms = float(np.sqrt(np.mean(resampled.astype(np.float64) ** 2)))
+                noise_floor = min(noise_floor, max(block_rms, 50.0))
+                if block_rms > max(3 * noise_floor, 350.0):
+                    speech_blocks += 1
+                    last_voice_time = audio_time
+                if speech_blocks >= 3 and audio_time - last_voice_time > silence_after_text:
+                    break
 
             if self.stop_listening:
                 print("Listening cancelled (handset hung up)")
-                recognized_text = ""
+            elif speech_blocks < 3:
+                print("No speech detected above the noise floor")
             else:
-                final = json.loads(self.recognizer.FinalResult()).get('text', '')
-                if final:
-                    utterances.append(final)
-                recognized_text = ' '.join(utterances)
-                if all(u in FILLER_WORDS for u in utterances):
-                    recognized_text = ""  # nothing but noise
+                recognized_text = self._transcribe_deepgram(np.concatenate(resampled_chunks))
+                if recognized_text is None:
+                    print("Transcription failed")
+                else:
+                    print(f"Deepgram heard: '{recognized_text}'")
+
+            try:
+                import wave
+                with wave.open('/tmp/last_request.wav', 'wb') as w:
+                    w.setnchannels(channels)
+                    w.setsampwidth(2)
+                    w.setframerate(self.capture_rate)
+                    w.writeframes(b''.join(raw_chunks))
+            except Exception as e:
+                print(f"Could not save debug recording: {e}")
 
             print(f"Closing stream, peak level {peak}/32767, recognized: '{recognized_text}'")
             stream.stop_stream()

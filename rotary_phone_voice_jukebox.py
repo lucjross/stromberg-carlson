@@ -115,6 +115,10 @@ class RotaryPhoneVoiceJukebox:
                 # Stop dial tone
                 self.audio.stop_all()
 
+                # Re-detect the mic now (USB audio may not have been ready at startup),
+                # before the prompt plays, so there is no delay before listening starts
+                self.mic_device_index = self.voice.find_microphone_device()
+
                 # Play operator message
                 print("Playing operator message...")
                 self.audio.speak("What would you like to hear?")
@@ -130,17 +134,14 @@ class RotaryPhoneVoiceJukebox:
         """Handle voice recognition and song search."""
         print("\n=== Listening for song request ===")
 
-        # Re-detect the mic each time; USB audio may not have been ready at startup
-        self.mic_device_index = self.voice.find_microphone_device()
-
         # Listen for speech (15 second timeout)
         recognized_text = self.voice.listen_for_speech(
             device_index=self.mic_device_index
         )
 
         if recognized_text is None:
-            print("Microphone error, returning to dial tone")
-            self.audio.speak("Sorry, I'm having trouble with the microphone.")
+            print("Microphone or transcription error, returning to dial tone")
+            self.audio.speak("Sorry, I'm having trouble hearing you right now.")
             self.state_machine.reset()
             return
 
