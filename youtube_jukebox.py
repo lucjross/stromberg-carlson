@@ -101,7 +101,9 @@ class YouTubeJukebox:
 
         try:
             ydl_opts = {
-                'format': 'bestaudio/best',
+                # Audio-only AAC (m4a) plays reliably on Chromecast devices; fall back to
+                # any audio-only stream. Avoid muxed video formats, which the WiiM rejects.
+                'format': 'bestaudio[ext=m4a]/bestaudio',
                 'quiet': True,
                 'no_warnings': True,
             }
