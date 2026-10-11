@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""
+Rotary Phone Controller for Raspberry Pi
+Reads input from a vintage rotary phone via GPIO pins.
+Supports rotary dial and hook switch.
+"""
+
+from gpiozero import Button
+from time import time, sleep
+import signal
+import sys
+
+
+class HookSwitch:
+    """
+    Monitors the hook switch on a rotary phone.
+
+    When the handset is down (on-hook), the circuit is closed.
+    When the handset is lifted (off-hook), the circuit is open.
+
+    Args:
+        hook_pin: GPIO pin number for hook switch
+        bounce_time: Debounce time in seconds for hook detection
+    """
+
+    def __init__(self, hook_pin, bounce_time=0.05):
+        self.hook_pin = hook_pin
+
+        # Set up GPIO pin
+        # The hook switch closes (pulls to ground) when handset is down
+        self.hook_button = Button(hook_pin, pull_up=True, bounce_time=bounce_time)
+
+        # Callbacks
+        self.off_hook_callback = None  # Called when handset is lifted
+        self.on_hook_callback = None   # Called when handset is placed down
+
+        # Set up event handlers
+        # When button is "pressed" (circuit closes), phone goes on-hook
+        self.hook_button.when_pressed = self._on_hook_down
+        # When button is "released" (circuit opens), phone goes off-hook
+        self.hook_button.when_released = self._on_hook_up
+
+    def _on_hook_down(self):
+        """Called when handset is placed down (circuit closes)."""
+        print("Phone on-hook (handset down)")
+        if self.on_hook_callback:
+            self.on_hook_callback()
+
+    def _on_hook_up(self):
+        """Called when handset is lifted (circuit opens)."""
+        print("Phone off-hook (handset lifted)")
+        if self.off_hook_callback:
+            self.off_hook_callback()
+
+    def is_off_hook(self):
+        """
+        Check if the phone is currently off-hook (handset lifted).
+
+        Returns:
+            bool: True if off-hook (handset lifted), False if on-hook
+        """
+        return not self.hook_button.is_pressed
+
+    def is_on_hook(self):
+        """
+        Check if the phone is currently on-hook (handset down).
+
+        Returns:
+            bool: True if on-hook (handset down), False if off-hook
+        """
+        return self.hook_button.is_pressed
+
+    def on_off_hook(self, callback):
+        """
+        Register a callback for when the handset is lifted (goes off-hook).
+
+        Args:
+            callback: Function to call when handset is lifted (no arguments)
+        """
+        self.off_hook_callback = callback
+
+    def on_on_hook(self, callback):
+        """
+        Register a callback for when the handset is placed down (goes on-hook).
+
+        Args:
+            callback: Function to call when handset is placed down (no arguments)
+        """
+        self.on_hook_callback = callback
+
+    def cleanup(self):
+        """Clean up GPIO resources."""
+        self.hook_button.close()
+
+
+class RotaryDial:
+    """
+    Reads input from a rotary phone dial.
+
+    Args:
+        pulse_pin: GPIO pin number for pulse contacts (blue/green wires)
+        ready_pin: GPIO pin number for off-normal switch (white wires)
+        pulse_timeout: Time in seconds to wait after last pulse before reporting digit
+        bounce_time: Debounce time in seconds for pulse detection
+    """
+
+    def __init__(self, pulse_pin, ready_pin, pulse_timeout=0.2, bounce_time=0.01):
+        self.pulse_pin = pulse_pin
+        self.ready_pin = ready_pin
+        self.pulse_timeout = pulse_timeout
+
+        # Set up GPIO pins
+        # The pulse contact closes (pulls to ground) on each pulse
+        self.pulse_button = Button(pulse_pin, pull_up=True, bounce_time=bounce_time)
+
+        # The ready switch opens when dial is at rest, closes when turning
+        self.ready_button = Button(ready_pin, pull_up=True, bounce_time=bounce_time)
+
+        # State tracking
+        self.pulse_count = 0
+        self.last_pulse_time = 0
+        self.dialing = False
+        self.digit_callback = None
+
+        # Set up event handlers
+        self.pulse_button.when_pressed = self._on_pulse
+        self.ready_button.when_pressed = self._on_dial_start
+        self.ready_button.when_released = self._on_dial_end
+
+    def _on_dial_start(self):
+        """Called when the dial starts turning (ready switch closes)."""
+        self.dialing = True
+        self.pulse_count = 0
+        print("Dial started turning...")
+
+    def _on_dial_end(self):
+        """Called when the dial returns to rest (ready switch opens)."""
+        if self.dialing:
+            print("Dial returned to rest")
+            self.dialing = False
+
+    def _on_pulse(self):
+        """Called on each pulse from the dial."""
+        if self.dialing:
+            self.pulse_count += 1
+            self.last_pulse_time = time()
+            print(f"Pulse {self.pulse_count}")
+
+    def _check_timeout(self):
+        """Check if enough time has passed since last pulse to report the digit."""
+        if self.pulse_count > 0 and not self.dialing:
+            if time() - self.last_pulse_time > self.pulse_timeout:
+                # Convert pulse count to digit (10 pulses = 0)
+                digit = self.pulse_count if self.pulse_count < 10 else 0
+                print(f"\nDialed digit: {digit}\n")
+
+                # Call the callback if set
+                if self.digit_callback:
+                    self.digit_callback(digit)
+
+                # Reset pulse count
+                self.pulse_count = 0
+
+    def on_digit(self, callback):
+        """
+        Register a callback function to be called when a digit is dialed.
+
+        Args:
+            callback: Function that takes a single integer argument (0-9)
+        """
+        self.digit_callback = callback
+
+    def run(self):
+        """
+        Start monitoring the dial. This will run until interrupted.
+        Call this after setting up any callbacks with on_digit().
+        """
+        print(f"Rotary dial reader started")
+        print(f"Pulse pin: GPIO {self.pulse_pin}")
+        print(f"Ready pin: GPIO {self.ready_pin}")
+        print("Waiting for dial input... (Press Ctrl+C to exit)\n")
+
+        try:
+            while True:
+                self._check_timeout()
+                sleep(0.01)  # Small delay to prevent CPU spinning
+        except KeyboardInterrupt:
+            print("\nExiting...")
+            self.cleanup()
+
+    def cleanup(self):
+        """Clean up GPIO resources."""
+        self.pulse_button.close()
+        self.ready_button.close()
+
+
+def main():
+    """
+    Example usage of the RotaryDial and HookSwitch classes.
+    Configure your GPIO pins here.
+    """
+    # Configure your GPIO pins (BCM numbering)
+    PULSE_PIN = 17  # Pulse contact pin (blue/green wires)
+    READY_PIN = 27  # Ready switch pin (white wires)
+    HOOK_PIN = 22   # Hook switch pin
+
+    # Create the dial reader and hook switch
+    dial = RotaryDial(pulse_pin=PULSE_PIN, ready_pin=READY_PIN)
+    hook = HookSwitch(hook_pin=HOOK_PIN)
+
+    # Track dialed number
+    dialed_number = []
+
+    # Set up hook switch callbacks
+    def on_handset_lifted():
+        print(">>> Ready to dial!")
+        dialed_number.clear()
+
+    def on_handset_down():
+        if dialed_number:
+            print(f">>> Call ended. Number dialed: {\'\'.join(map(str, dialed_number))}")
+        else:
+            print(">>> Call ended")
+        dialed_number.clear()
+
+    hook.on_off_hook(on_handset_lifted)
+    hook.on_on_hook(on_handset_down)
+
+    # Set up dial callback
+    def on_digit_dialed(digit):
+        if hook.is_off_hook():
+            dialed_number.append(digit)
+            print(f">>> Digit: {digit} | Number so far: {\'\'.join(map(str, dialed_number))}")
+        else:
+            print(f">>> Digit dialed while on-hook: {digit}")
+
+    dial.on_digit(on_digit_dialed)
+
+    # Set up signal handler for clean shutdown
+    def signal_handler(sig, frame):
+        print("\nShutting down...")
+        dial.cleanup()
+        hook.cleanup()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Print startup info
+    print("Rotary Phone Controller Started")
+    print(f"Pulse pin: GPIO {PULSE_PIN}")
+    print(f"Ready pin: GPIO {READY_PIN}")
+    print(f"Hook pin: GPIO {HOOK_PIN}")
+
+    # Print initial hook state
+    if hook.is_off_hook():
+        print("Current state: OFF-HOOK (handset lifted)")
+    else:
+        print("Current state: ON-HOOK (handset down)")
+
+    print("\nWaiting for phone activity... (Press Ctrl+C to exit)\n")
+
+    # Keep running and checking for dial timeout
+    try:
+        while True:
+            dial._check_timeout()
+            sleep(0.01)
+    except KeyboardInterrupt:
+        print("\nExiting...")
+        dial.cleanup()
+        hook.cleanup()
+
+
+if __name__ == "__main__":
+    main()

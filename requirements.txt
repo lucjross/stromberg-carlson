@@ -1,0 +1,8 @@
+gpiozero
+python-dotenv
+gTTS
+ytmusicapi
+vosk
+pyaudio
+pychromecast
+yt-dlp
