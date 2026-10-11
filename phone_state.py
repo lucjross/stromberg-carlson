@@ -25,6 +25,7 @@ class PhoneStateMachine:
     ON_HOOK → DIAL_TONE (when handset lifted)
     DIAL_TONE → WAITING_FOR_OPERATOR (dial tone playing)
     WAITING_FOR_OPERATOR → OPERATOR_MESSAGE (when 0 dialed)
+    WAITING_FOR_OPERATOR → (unchanged) when 8 dialed: stop the music
     OPERATOR_MESSAGE → REQUESTING (after message plays)
     REQUESTING → ANNOUNCING (after voice recognition completes)
     ANNOUNCING → DIAL_TONE (after announcement, song plays in background)
@@ -91,6 +92,9 @@ class PhoneStateMachine:
                 return self.operator_requested()
             elif digit == 6:
                 # Shutdown command - accept but don't change state
+                return True
+            elif digit == 8:
+                # Stop playback command - accept but don't change state
                 return True
             else:
                 # Invalid, ignore or reset to dial tone

@@ -110,6 +110,16 @@ class RotaryPhoneVoiceJukebox:
                 subprocess.run(["sudo", "shutdown", "-h", "now"])
                 return
 
+            # Handle stop-playback command (digit 8)
+            if digit == 8:
+                print("Stop playback command received")
+                self.audio.stop_all()
+                stopped = self.jukebox.stop_playback()
+                self.audio.speak("Music stopped." if stopped else "Sorry, I couldn't stop the music.")
+                if self.state_machine.state != PhoneState.ON_HOOK:
+                    self.audio.play_dial_tone()
+                return
+
             if self.state_machine.state == PhoneState.OPERATOR_MESSAGE:
                 # Stop dial tone
                 self.audio.stop_all()

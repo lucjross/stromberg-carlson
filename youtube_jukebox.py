@@ -200,6 +200,42 @@ class YouTubeJukebox:
             traceback.print_exc()
             return False
 
+    def stop_playback(self):
+        """
+        Stop whatever is playing on the Chromecast.
+
+        Reconnects first if needed (e.g. after the service restarted).
+
+        Returns:
+            bool: True if a stop command was sent
+        """
+        if not self.cast_device:
+            if not self.find_chromecast(self.chromecast_name):
+                print("Cannot stop: No Chromecast connected")
+                return False
+
+        try:
+            self.cast_device.wait()
+            mc = self.cast_device.media_controller
+
+            # A fresh connection doesn't know about a session started earlier; refresh it
+            mc.update_status()
+            deadline = time.time() + 3
+            while mc.status.media_session_id is None and time.time() < deadline:
+                time.sleep(0.1)
+
+            if mc.status.media_session_id is not None:
+                mc.stop()
+            else:
+                # No media session visible: shut down the Cast app instead
+                self.cast_device.quit_app()
+
+            print(f"✓ Stopped playback on {self.cast_device.name}")
+            return True
+        except Exception as e:
+            print(f"Error stopping playback: {e}")
+            return False
+
     def play_track(self, video_id):
         """
         Play track by casting to Chromecast.
