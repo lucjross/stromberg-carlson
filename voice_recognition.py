@@ -30,6 +30,10 @@ def stereo_to_mono(stereo_data):
     return struct.pack(f'{len(mono_samples)}h', *mono_samples)
 
 
+# Single words Vosk tends to hallucinate from noise
+FILLER_WORDS = {'the', 'a', 'uh', 'um', 'huh', 'when', 'oh', 'hm', 'mm'}
+
+
 class StreamResampler:
     """Chunk-safe resampler with an anti-alias low-pass filter (numpy only)."""
 
@@ -170,8 +174,10 @@ class VoiceRecognizer:
             resampler = StreamResampler(self.capture_rate, self.hardware_rate)
             peak = 0
             utterances = []
-            last_text_time = None
-            silence_after_text = 2.0
+            last_activity = start_time
+            last_partial = ""
+            silence_after_text = 1.5
+            settle_seconds = 0.5
 
             while time.time() - start_time < max_timeout and not self.stop_listening:
                 data = stream.read(chunk_44k, exception_on_overflow=False)
@@ -181,14 +187,28 @@ class VoiceRecognizer:
                 resampled = resampler.process(samples)
                 peak = max(peak, int(np.abs(samples).max()))
 
+                # Ignore the first moments: prompt tail / line noise can yield junk words
+                if time.time() - start_time < settle_seconds:
+                    continue
+
                 if self.recognizer.AcceptWaveform(resampled.tobytes()):
                     text = json.loads(self.recognizer.Result()).get('text', '')
+                    last_partial = ""
                     if text:
+                        print(f"Heard: '{text}'")
                         utterances.append(text)
-                        last_text_time = time.time()
+                        last_activity = time.time()
+                else:
+                    partial = json.loads(self.recognizer.PartialResult()).get('partial', '')
+                    if partial and partial != last_partial:
+                        last_activity = time.time()
+                    last_partial = partial
 
-                if last_text_time and time.time() - last_text_time > silence_after_text:
-                    break
+                # Stop once real speech was heard and then went quiet
+                if utterances and not last_partial and time.time() - last_activity > silence_after_text:
+                    if not all(u in FILLER_WORDS for u in utterances):
+                        break
+                    utterances = []  # only noise so far; keep listening
 
             if self.stop_listening:
                 print("Listening cancelled (handset hung up)")
@@ -198,6 +218,8 @@ class VoiceRecognizer:
                 if final:
                     utterances.append(final)
                 recognized_text = ' '.join(utterances)
+                if all(u in FILLER_WORDS for u in utterances):
+                    recognized_text = ""  # nothing but noise
 
             print(f"Closing stream, peak level {peak}/32767, recognized: '{recognized_text}'")
             stream.stop_stream()
