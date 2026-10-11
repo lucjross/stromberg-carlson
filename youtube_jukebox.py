@@ -179,8 +179,20 @@ class YouTubeJukebox:
             mc.play_media(stream_url, 'audio/mp4')
             mc.block_until_active()
 
-            print(f"✓ Now playing audio stream on {self.cast_device.name}")
-            return True
+            # block_until_active only means the Cast app started; wait for real playback
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                status = mc.status
+                if status.player_state in ('PLAYING', 'BUFFERING'):
+                    print(f"✓ Now playing audio stream on {self.cast_device.name}")
+                    return True
+                if status.player_state == 'IDLE' and status.idle_reason in ('ERROR', 'INTERRUPTED', 'CANCELLED'):
+                    print(f"Chromecast rejected the stream (idle_reason={status.idle_reason})")
+                    return False
+                time.sleep(0.25)
+
+            print(f"Chromecast never started playing (state={mc.status.player_state})")
+            return False
 
         except Exception as e:
             print(f"Error casting to Chromecast: {e}")
