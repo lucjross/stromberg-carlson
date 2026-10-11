@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Voice Recognition using Vosk
-Handles speech-to-text for song requests.
+Voice Recognition using Deepgram
+Captures speech from the phone mic and transcribes song requests.
 """
 
 import json
 import pyaudio
-import vosk
 import os
 import sys
 import struct
@@ -93,44 +92,14 @@ def suppress_alsa_errors():
 
 class VoiceRecognizer:
     """
-    Handles voice recognition using Vosk for offline speech-to-text.
+    Captures speech from the microphone and transcribes it with Deepgram.
     """
 
-    def __init__(self, model_path="vosk-model-small-en-us-0.15", sample_rate=44100):
-        """
-        Initialize Vosk voice recognizer.
-
-        Args:
-            model_path: Path to Vosk model directory
-            sample_rate: Audio sample rate (44100 for Sound Blaster compatibility)
-        """
-        self.model_path = model_path
-        self.sample_rate = sample_rate
+    def __init__(self):
         self.capture_rate = 44100   # Sound Blaster's native rate (doesn't support 16kHz)
-        self.hardware_rate = 16000  # Vosk model's expected rate
-        self.model = None
-        self.recognizer = None
+        self.hardware_rate = 16000  # Rate of the audio sent for transcription
         self.stop_listening = False  # Flag to stop listening early
         self._mic_channels = 1  # updated by find_microphone_device()
-
-        # Load model
-        self._load_model()
-
-    def _load_model(self):
-        """Load Vosk model from disk."""
-        if not os.path.exists(self.model_path):
-            raise FileNotFoundError(
-                f"Vosk model not found at {self.model_path}\n"
-                f"Download a model from https://alphacephei.com/vosk/models\n"
-                f"Example: wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip\n"
-                f"Then: unzip vosk-model-small-en-us-0.15.zip"
-            )
-
-        print(f"Loading Vosk model from {self.model_path}...")
-        self.model = vosk.Model(self.model_path)
-        # Use hardware rate for recognizer to match audio input
-        self.recognizer = vosk.KaldiRecognizer(self.model, self.hardware_rate)
-        print(f"Vosk model loaded successfully (using {self.hardware_rate} Hz)")
 
     def _transcribe_deepgram(self, pcm16k):
         """Transcribe 16 kHz mono int16 audio with Deepgram. Returns text ('' if none heard), or None on failure."""
@@ -172,7 +141,6 @@ class VoiceRecognizer:
             str: Recognized text, or empty string if nothing recognized.
             None if the microphone or transcription failed.
         """
-        self.recognizer.Reset()
         import time
         t_called = time.time()
 
@@ -214,8 +182,8 @@ class VoiceRecognizer:
             self.stop_listening = False
 
             # Capture until speech has been heard and then ends, or timeout.
-            # The loop only does cheap work: Vosk runs ~2x slower than real time on a
-            # Pi 3B+, and running it here made the mic buffer overflow and drop audio.
+            # Keep this loop cheap: per-chunk work slower than real time on a Pi 3B+
+            # makes the mic buffer overflow and drop audio.
             recognized_text = ""
 
             chunk_44k = 4096
@@ -224,16 +192,16 @@ class VoiceRecognizer:
             highpass = HighPass(self.hardware_rate)
             peak = 0
             resampled_chunks = []
-            raw_chunks = []  # debug: keep raw capture so it can be replayed offline
+            chunk_count = 0
             noise_floor = float('inf')
             speech_blocks = 0
             last_voice_time = 0.0  # in audio time (seconds of audio captured)
             silence_after_text = 1.2
 
-            while len(raw_chunks) * chunk_seconds < max_timeout and not self.stop_listening:
+            while chunk_count * chunk_seconds < max_timeout and not self.stop_listening:
                 data = stream.read(chunk_44k, exception_on_overflow=False)
-                raw_chunks.append(data)
-                audio_time = len(raw_chunks) * chunk_seconds
+                chunk_count += 1
+                audio_time = chunk_count * chunk_seconds
 
                 mono = stereo_to_mono(data) if channels == 2 else data
                 samples = np.frombuffer(mono, dtype=np.int16)
@@ -261,16 +229,6 @@ class VoiceRecognizer:
                     print("Transcription failed")
                 else:
                     print(f"Deepgram heard: '{recognized_text}'")
-
-            try:
-                import wave
-                with wave.open('/tmp/last_request.wav', 'wb') as w:
-                    w.setnchannels(channels)
-                    w.setsampwidth(2)
-                    w.setframerate(self.capture_rate)
-                    w.writeframes(b''.join(raw_chunks))
-            except Exception as e:
-                print(f"Could not save debug recording: {e}")
 
             print(f"Closing stream, peak level {peak}/32767, recognized: '{recognized_text}'")
             stream.stop_stream()
@@ -338,7 +296,7 @@ def test_voice_recognition():
             print("\nUsing default microphone")
 
         print("\nSay something (e.g., 'play bohemian rhapsody by queen'):")
-        text = recognizer.listen_for_speech(timeout=5, device_index=device_index)
+        text = recognizer.listen_for_speech(device_index=device_index)
 
         if text:
             print(f"\nYou said: '{text}'")

@@ -19,13 +19,12 @@ class RotaryPhoneVoiceJukebox:
     Main jukebox controller integrating all components.
     """
 
-    def __init__(self, chromecast_name=None, vosk_model_path="vosk-model-small-en-us-0.15"):
+    def __init__(self, chromecast_name=None):
         """
         Initialize the rotary phone voice jukebox.
 
         Args:
             chromecast_name: Name of Chromecast device (None = auto-discover)
-            vosk_model_path: Path to Vosk model directory
         """
         print("Initializing Rotary Phone Voice Jukebox...")
 
@@ -41,7 +40,7 @@ class RotaryPhoneVoiceJukebox:
 
         # Voice recognition
         print("Loading voice recognition...")
-        self.voice = VoiceRecognizer(model_path=vosk_model_path)
+        self.voice = VoiceRecognizer()
 
         # YouTube Music + Chromecast
         print("Connecting to YouTube Music...")
@@ -224,16 +223,12 @@ def main():
     load_dotenv()
 
     chromecast_name = os.getenv("CHROMECAST_NAME")
-    vosk_model_path = os.getenv("VOSK_MODEL_PATH", "vosk-model-small-en-us-0.15")
 
     print(f"Configuration:")
     print(f"  Chromecast: {chromecast_name or 'Auto-discover'}")
-    print(f"  Vosk Model: {vosk_model_path}\n")
+    print()
 
-    jukebox = RotaryPhoneVoiceJukebox(
-        chromecast_name=chromecast_name,
-        vosk_model_path=vosk_model_path
-    )
+    jukebox = RotaryPhoneVoiceJukebox(chromecast_name=chromecast_name)
     jukebox.run()
 
 
