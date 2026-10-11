@@ -5,3 +5,5 @@ ytmusicapi
 pyaudio
 pychromecast
 yt-dlp
+numpy
+requests
